@@ -32,26 +32,40 @@ data class PixelRect(val left: Int, val top: Int, val right: Int, val bottom: In
  * ```
  *
  * `screencap` takes a **SurfaceFlinger** display id, while `input` and
- * `cmd activity start --display` take a **DisplayManager logical** id. Using the
- * wrong one for `screencap` fails loudly (good), but a sloppy backend could also
- * capture the physical screen and then inject the tap into the virtual one - which
- * would silently produce a correct-looking frame with mis-targeted input.
+ * `cmd activity start --display` take a **DisplayManager logical** id.
  *
- * Keeping both ids in one object, populated from one resolution pass, makes that
- * class of bug structurally hard to write.
+ * ---------------------------------------------------------------------------
+ * Why [surfaceFlingerId] is a [ULong] and not a Long
+ * ---------------------------------------------------------------------------
+ * The SurfaceFlinger id is a `uint64_t` and routinely exceeds `Long.MAX_VALUE`:
+ *
+ * ```
+ *   11529215048376362670  = 0xA0000000898FA6AE
+ *   Long.MAX_VALUE        =  9223372036854775807
+ *   as signed int64       = -6917529025333188946
+ * ```
+ *
+ * Of the four ids measured on this device, two exceeded `Long.MAX_VALUE` while the
+ * physical display's (`4630946738963277955`) did not, so a sample that happens to
+ * hit a small id will not reveal the bug. Parsing into `Long` throws
+ * `NumberFormatException` on the large ones - which is how this was found: the first
+ * version of this class used Long and failed to compile its own test literal.
+ *
+ * Using `ULong` keeps the full 64-bit range and still renders the exact decimal
+ * string `screencap -d` expects via `toString()`.
  */
 data class DisplayIds(
     /** DisplayManager logical id. Used by `input -d` and `cmd activity start --display`. */
     val logicalId: Int,
     /**
-     * SurfaceFlinger display id. Used by `screencap -d`.
+     * SurfaceFlinger display id. Used by `screencap -d`. Unsigned 64-bit.
      *
      * Nullable because it is resolved by a separate query (`dumpsys SurfaceFlinger
      * --display-id`) that can fail or lag behind display creation. A null here must
      * make the frame source refuse to capture, rather than fall back to the default
      * display.
      */
-    val surfaceFlingerId: Long?,
+    val surfaceFlingerId: ULong?,
 ) {
     init {
         require(logicalId > 0) {
