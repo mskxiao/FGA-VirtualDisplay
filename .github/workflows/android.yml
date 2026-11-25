@@ -15,9 +15,13 @@ on:
         required: false
         default: 'manual build'
 
+# Deliberately NOT cancel-in-progress: a cancelled build tells us nothing about
+# whether the tree compiles, and a Gradle Android build costs ~10 minutes. Rapid
+# successive pushes should queue, not kill each other. Only pull-request builds
+# cancel their own predecessors, where a newer commit genuinely supersedes the old one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -74,7 +78,7 @@ jobs:
         run: |
           echo "java: $(java -version 2>&1 | head -1)"
           echo "gradle wrapper: $(grep distributionUrl gradle/wrapper/gradle-wrapper.properties)"
-          echo "modules: $(grep -c '^include' settings.gradle.kts)"
+          echo "modules:"
           grep '^include' settings.gradle.kts
 
       - name: Build APK (assembleCi)
@@ -82,11 +86,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          ./gradlew :app:assembleCi \
-            -PFGA_VERSION_CODE="${GITHUB_RUN_NUMBER}" \
-            -PFGA_VERSION_NAME="${GITHUB_REF_NAME}-$(echo "${GITHUB_SHA}" | cut -c1-7)" \
-            2>&1 | tee build.log
-          echo "build_exit=${PIPESTATUS[0]}" >>"$GITHUB_OUTPUT"
+          ./gradlew :app:assembleCi --stacktrace 2>&1 | tee build.log
         env:
           FGA_VERSION_CODE: ${{ github.run_number }}
           FGA_VERSION_NAME: ${{ steps.ver.outputs.build_name }}
@@ -95,30 +95,28 @@ jobs:
         id: artifact
         shell: bash
         run: |
-          set -o pipefail
-          SRC_DIR="$(dirname "$(find app/build/outputs/apk/ci -name '*.apk' | head -1)")"
-          if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
-            echo '::error title=APK not found::assembleCi produced no APK. Check the build log.'
+          APK="$(find app/build/outputs/apk/ci -name '*.apk' -type f | head -1)"
+          if [ -z "$APK" ]; then
+            echo '::error title=APK not found::assembleCi produced no APK. Check build.log.'
             exit 1
           fi
           APK_NAME="FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}.apk"
-          cp "$SRC_DIR"/*.apk "$SRC_DIR/$APK_NAME"
-          echo "apk_path=$SRC_DIR/$APK_NAME" >>"$GITHUB_OUTPUT"
+          cp "$APK" "$APK_NAME"
           echo "apk_name=$APK_NAME" >>"$GITHUB_OUTPUT"
-          ls -l "$SRC_DIR"
+          ls -l "$APK_NAME"
           {
             echo "### APK"
             echo ""
             echo "- file: \`${APK_NAME}\`"
-            echo "- size: $(du -h "$SRC_DIR/$APK_NAME" | cut -f1)"
-            echo "- sha256: \`$(sha256sum "$SRC_DIR/$APK_NAME" | cut -d' ' -f1)\`"
+            echo "- size: $(du -h "$APK_NAME" | cut -f1)"
+            echo "- sha256: \`$(sha256sum "$APK_NAME" | cut -d' ' -f1)\`"
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}
-          path: ${{ steps.artifact.outputs.apk_path }}
+          path: ${{ steps.artifact.outputs.apk_name }}
           if-no-files-found: error
           retention-days: 30
 
