@@ -15,9 +15,6 @@ on:
         required: false
         default: 'manual build'
 
-# Deliberately NOT cancel-in-progress on push: a cancelled build tells us nothing
-# about whether the tree compiles, and a Gradle Android build costs ~10 minutes.
-# Only pull-request builds cancel their own predecessors.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -45,7 +42,6 @@ jobs:
         run: |
           SHA="${GITHUB_SHA}"
           SHORT="$(echo "$SHA" | cut -c1-7)"
-          echo "sha=$SHA" >>"$GITHUB_OUTPUT"
           echo "short=$SHORT" >>"$GITHUB_OUTPUT"
           echo "build_name=${SHORT}-run${GITHUB_RUN_NUMBER}" >>"$GITHUB_OUTPUT"
           {
@@ -78,37 +74,60 @@ jobs:
           echo "modules:"
           grep '^include' settings.gradle.kts
 
-      # :vdisplay tests run on the JVM with no emulator, so a broken parser fails in
-      # about a minute instead of after a ten-minute Android build.
+      # Pure-JVM tests only; they need no emulator. Ordered cheapest first so a broken
+      # parser or a broken quoting rule fails in about a minute, not after a ten-minute
+      # Android build. Neither step aborts the job on its own; the diagnosis steps below
+      # decide what to report, so a failure always carries its reason.
       - name: Unit tests (:vdisplay)
-        id: tests
-        continue-on-error: true
+        id: tests_vdisplay
         shell: bash
+        continue-on-error: true
         run: |
           set -o pipefail
-          ./gradlew :vdisplay:test --stacktrace 2>&1 | tee test.log
+          ./gradlew :vdisplay:test --stacktrace 2>&1 | tee test-vdisplay.log
 
-      # Annotations and the step summary are readable over the REST API without a
-      # token, while artifact downloads require auth. Keeping the real cause here
-      # makes a failure diagnosable from outside the repository.
-      - name: Summarise test failure
-        if: steps.tests.outcome == 'failure'
+      # :app now carries the probe logic tests (su quoting, colour detector).
+      - name: Unit tests (:app, probe logic)
+        id: tests_app
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew :app:testCiUnitTest --stacktrace 2>&1 | tee test-app.log
+
+      # Runs unconditionally. GitHub's `steps.<id>.outcome` is not reliable across a
+      # `continue-on-error` step in every runner version, and a diagnosis step that silently
+      # skips is worse than useless - it makes a real failure look reasonless. So this looks
+      # at the logs themselves.
+      - name: Diagnose test results
+        if: always()
         shell: bash
         run: |
-          echo '::group::test.log (tail 150)'
-          tail -150 test.log 2>/dev/null || echo 'no test.log'
-          echo '::endgroup::'
-          CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not' test.log 2>/dev/null | head -25)
-          {
-            echo '### :vdisplay unit tests FAILED'
-            echo ''
-            echo '```'
-            echo "${CAUSE:-no recognised error line; see the full log}"
-            echo '```'
-          } >>"$GITHUB_STEP_SUMMARY"
-          FIRST=$(echo "$CAUSE" | head -1)
-          echo "::error title=:vdisplay tests failed::${FIRST:-see test.log}"
-          exit 1
+          failed=0
+          for f in test-vdisplay.log test-app.log; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              test-vdisplay.log) mod=":vdisplay" ;;
+              *) mod=":app" ;;
+            esac
+            if grep -qE '^> Task .*FAILED|FAILURE: Build failed' "$f"; then
+              echo "::group::$f (tail 120)"
+              tail -120 "$f"
+              echo '::endgroup::'
+              CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not|^> Task .*FAILED' "$f" | head -25)
+              {
+                echo "### $mod tests FAILED"
+                echo ''
+                echo '```'
+                echo "${CAUSE:-no recognised error line}"
+                echo '```'
+              } >>"$GITHUB_STEP_SUMMARY"
+              FIRST=$(echo "$CAUSE" | head -1)
+              echo "::error title=$mod tests failed::${FIRST:-see $f}"
+              failed=1
+            fi
+          done
+          [ "$failed" = "1" ] && exit 1 || exit 0
 
       - name: Build APK (assembleCi)
         id: build
@@ -120,32 +139,38 @@ jobs:
           FGA_VERSION_CODE: ${{ github.run_number }}
           FGA_VERSION_NAME: ${{ steps.ver.outputs.build_name }}
 
-      - name: Summarise build failure
-        if: steps.build.outcome == 'failure'
+      # Same reasoning as above: unconditional, and decides from the log. A Kotlin compile
+      # error is the most likely failure here, so the patterns target those messages.
+      - name: Diagnose build result
+        if: always()
         shell: bash
         run: |
+          if [ -f build.log ] && grep -qE 'BUILD SUCCESSFUL' build.log; then
+            echo 'build succeeded'
+            exit 0
+          fi
           echo '::group::build.log (tail 200)'
           tail -200 build.log 2>/dev/null || echo 'no build.log'
           echo '::endgroup::'
-          CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not' build.log 2>/dev/null | head -40)
+          CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not|^> Task .*FAILED|Execution failed for task' build.log 2>/dev/null | head -40)
           {
             echo '### assembleCi FAILED'
             echo ''
             echo '```'
-            echo "${CAUSE:-no recognised error line; see the full log}"
+            echo "${CAUSE:-no recognised error line; see the artifact build-log}"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
           FIRST=$(echo "$CAUSE" | head -1)
           echo "::error title=assembleCi failed::${FIRST:-see build.log}"
+          exit 1
 
       - name: Rename artifact
         id: artifact
-        if: steps.build.outcome == 'success'
         shell: bash
         run: |
           APK="$(find app/build/outputs/apk/ci -name '*.apk' -type f | head -1)"
           if [ -z "$APK" ]; then
-            echo '::error title=APK not found::assembleCi produced no APK. Check build.log.'
+            echo '::error title=APK not found::assembleCi produced no APK.'
             exit 1
           fi
           APK_NAME="FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}.apk"
@@ -161,7 +186,6 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
-        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}
@@ -176,6 +200,7 @@ jobs:
           name: build-log-${{ steps.ver.outputs.build_name }}
           path: |
             build.log
-            test.log
+            test-vdisplay.log
+            test-app.log
           if-no-files-found: warn
           retention-days: 14
