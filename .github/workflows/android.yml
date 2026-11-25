@@ -1,0 +1,142 @@
+# Build APK for the FGA VirtualDisplay prototype.
+#
+# No GitHub Secrets are required: the `ci` buildType uses the debug keystore,
+# which is already committed at app/fgadebug.keystore (public upstream file).
+name: Android CI
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you building manually?'
+        required: false
+        default: 'manual build'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '21'
+  JAVA_DISTRO: 'temurin'
+  # Overrides the small heap in gradle.properties (sized for local AS coexistence).
+  GRADLE_OPTS: '-Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"'
+
+jobs:
+  build:
+    name: assembleCi
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record version info
+        id: ver
+        shell: bash
+        run: |
+          SHA="${GITHUB_SHA}"
+          SHORT="$(echo "$SHA" | cut -c1-7)"
+          echo "sha=$SHA" >>"$GITHUB_OUTPUT"
+          echo "short=$SHORT" >>"$GITHUB_OUTPUT"
+          echo "build_name=${SHORT}-run${GITHUB_RUN_NUMBER}" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Build info"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| commit | \`${SHA}\` |"
+            echo "| branch | \`${GITHUB_REF_NAME}\` |"
+            echo "| run | [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRO }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # Fail early and legibly instead of drowning in a 2000-line Gradle dump.
+      - name: Show environment
+        shell: bash
+        run: |
+          echo "java: $(java -version 2>&1 | head -1)"
+          echo "gradle wrapper: $(grep distributionUrl gradle/wrapper/gradle-wrapper.properties)"
+          echo "modules: $(grep -c '^include' settings.gradle.kts)"
+          grep '^include' settings.gradle.kts
+
+      - name: Build APK (assembleCi)
+        id: build
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleCi \
+            -PFGA_VERSION_CODE="${GITHUB_RUN_NUMBER}" \
+            -PFGA_VERSION_NAME="${GITHUB_REF_NAME}-$(echo "${GITHUB_SHA}" | cut -c1-7)" \
+            2>&1 | tee build.log
+          echo "build_exit=${PIPESTATUS[0]}" >>"$GITHUB_OUTPUT"
+        env:
+          FGA_VERSION_CODE: ${{ github.run_number }}
+          FGA_VERSION_NAME: ${{ steps.ver.outputs.build_name }}
+
+      - name: Rename artifact
+        id: artifact
+        shell: bash
+        run: |
+          set -o pipefail
+          SRC_DIR="$(dirname "$(find app/build/outputs/apk/ci -name '*.apk' | head -1)")"
+          if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
+            echo '::error title=APK not found::assembleCi produced no APK. Check the build log.'
+            exit 1
+          fi
+          APK_NAME="FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}.apk"
+          cp "$SRC_DIR"/*.apk "$SRC_DIR/$APK_NAME"
+          echo "apk_path=$SRC_DIR/$APK_NAME" >>"$GITHUB_OUTPUT"
+          echo "apk_name=$APK_NAME" >>"$GITHUB_OUTPUT"
+          ls -l "$SRC_DIR"
+          {
+            echo "### APK"
+            echo ""
+            echo "- file: \`${APK_NAME}\`"
+            echo "- size: $(du -h "$SRC_DIR/$APK_NAME" | cut -f1)"
+            echo "- sha256: \`$(sha256sum "$SRC_DIR/$APK_NAME" | cut -d' ' -f1)\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}
+          path: ${{ steps.artifact.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.ver.outputs.build_name }}
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Print the tail of the log inline so the failure is readable in the
+      # GitHub UI without downloading the artifact.
+      - name: Show build log tail on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo '::group::build.log (tail 200)'
+          tail -200 build.log 2>/dev/null || echo 'no build.log'
+          echo '::endgroup::'
