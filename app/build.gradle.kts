@@ -102,6 +102,10 @@ dependencies {
     implementation(project(":scripts"))
     implementation(project(":prefs"))
 
+    // [FGA-VirtualDisplay] stage 2A: the virtual display backend seam.
+    // The dependency arrow is app -> vdisplay only; :vdisplay does not know about FGA.
+    implementation(project(":vdisplay"))
+
 
     implementation(libs.kotlin.stdlib)
 
