@@ -2,6 +2,7 @@ package io.github.fate_grand_automata.vdisplay
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -22,7 +23,7 @@ class DisplayOutputParsersTest {
     """.trimIndent()
 
     @Test
-    fun `parses both physical and virtual surfaceflinger ids`() {
+    fun parsesBothPhysicalAndVirtualSurfaceFlingerIds() {
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(sfOutput)
         assertEquals(2, ids.size)
         assertTrue(ids.containsKey(4630946738963277955L))
@@ -30,7 +31,7 @@ class DisplayOutputParsersTest {
     }
 
     @Test
-    fun `surfaceflinger ids exceed int range and must be parsed as long`() {
+    fun surfaceFlingerIdsExceedIntRangeAndMustBeParsedAsLong() {
         // 11529215048376362670 > Int.MAX_VALUE. Parsing as Int would truncate it and
         // capture would silently target the wrong display.
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(sfOutput)
@@ -39,13 +40,14 @@ class DisplayOutputParsersTest {
     }
 
     @Test
-    fun `keeps the virtual display name so it can be preferred when resolving`() {
+    fun keepsTheVirtualDisplayNameSoItCanBePreferredWhenResolving() {
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(sfOutput)
-        assertTrue(ids.getValue(11529215048376362670L).contains("Virtual"))
+        val desc = ids.getValue(11529215048376362670L)
+        assertTrue(desc.contains("Virtual"), "expected the SF description to mention Virtual, was: $desc")
     }
 
     @Test
-    fun `ignores unparseable lines instead of failing the whole dump`() {
+    fun ignoresUnparseableLinesInsteadOfFailingTheWholeDump() {
         val messy = """
             some header line
             Display notanumber (Virtual display): displayName="x"
@@ -60,7 +62,7 @@ class DisplayOutputParsersTest {
     // ---------------------------------------------------------- logical displays
 
     @Test
-    fun `parses logical display type uniqueId and layerStack`() {
+    fun parsesLogicalDisplayTypeUniqueIdAndLayerStack() {
         val output = """
             Displays:
             Display id 0: DisplayInfo{"内置屏幕", displayId 0, displayGroupId 0, FLAG_SECURE, real 1440 x 3200, uniqueId "local:4630946738963277955", type INTERNAL, layerStack 0, canHostTasks true}
@@ -72,12 +74,12 @@ class DisplayOutputParsersTest {
         val virtual = list.first { it.displayId == 24 }
         assertEquals("OVERLAY", virtual.type)
         assertEquals("overlay:1", virtual.uniqueId)
-        // This invariant was verified three times on device; capture pairing relies on it.
+        // This invariant was verified three times on device; id pairing relies on it.
         assertEquals(virtual.displayId, virtual.layerStack)
     }
 
     @Test
-    fun `parses ids-only output`() {
+    fun parsesIdsOnlyOutput() {
         assertEquals(listOf(0, 22), DisplayOutputParsers.parseDisplayIdsOnly("0\n22\n"))
         assertEquals(listOf(0), DisplayOutputParsers.parseDisplayIdsOnly("0"))
         assertEquals(emptyList(), DisplayOutputParsers.parseDisplayIdsOnly(""))
@@ -85,10 +87,16 @@ class DisplayOutputParsersTest {
 
     // ------------------------------------------------------------- screencap raw
 
-    /** Build a header + fake payload the way `screencap` emits it. */
-    private fun rawScreencap(width: Int, height: Int, format: Int = 1, includeExtra: Boolean = true): ByteArray {
-        val size = width * height * 4
-        val out = ByteArray(if (includeExtra) 16 else 12 + size)
+    /** Build a header the way `screencap` emits it, plus a correctly sized payload. */
+    private fun rawScreencap(
+        width: Int,
+        height: Int,
+        format: Int = 1,
+        includeExtra: Boolean = true,
+    ): ByteArray {
+        val pixelBytes = width * height * 4
+        val headerBytes = if (includeExtra) 16 else 12
+        val out = ByteArray(headerBytes + pixelBytes)
         fun putInt(offset: Int, v: Int) {
             out[offset] = (v and 0xFF).toByte()
             out[offset + 1] = ((v shr 8) and 0xFF).toByte()
@@ -103,7 +111,7 @@ class DisplayOutputParsersTest {
     }
 
     @Test
-    fun `parses 16-byte header used on api 26+`() {
+    fun parses16ByteHeaderUsedOnApi26Plus() {
         val h = DisplayOutputParsers.parseScreencapHeader(rawScreencap(1280, 720))
         assertNotNull(h)
         assertEquals(1280, h.width)
@@ -114,26 +122,26 @@ class DisplayOutputParsersTest {
     }
 
     @Test
-    fun `parses 12-byte header when no extra int is present`() {
+    fun parses12ByteHeaderWhenNoExtraIntIsPresent() {
         val h = DisplayOutputParsers.parseScreencapHeader(rawScreencap(1280, 720, includeExtra = false))
         assertNotNull(h)
         assertEquals(12, h.headerBytes)
     }
 
     @Test
-    fun `returns null for a buffer too short to hold a header`() {
+    fun returnsNullForABufferTooShortToHoldAHeader() {
         assertNull(DisplayOutputParsers.parseScreencapHeader(ByteArray(8)))
     }
 
     @Test
-    fun `rejects a non-rgba8888 format`() {
+    fun rejectsANonRgba8888Format() {
         val h = DisplayOutputParsers.parseScreencapHeader(rawScreencap(1280, 720, format = 5))
         assertNotNull(h)
-        assertTrue(!h.isRgba8888)
+        assertFalse(h.isRgba8888, "format 5 must not be reported as RGBA_8888")
     }
 
     @Test
-    fun `matches the payload size actually measured on device`() {
+    fun matchesThePayloadSizeActuallyMeasuredOnDevice() {
         // Verified: screencap -d <sfid> for a 1280x720 display gave exactly 3686416 bytes.
         val expected = 1280 * 720 * 4 + 16
         assertEquals(3686416, expected)
@@ -145,7 +153,7 @@ class DisplayOutputParsersTest {
     // -------------------------------------------------------------- activities
 
     @Test
-    fun `groups packages by display id`() {
+    fun groupsPackagesByDisplayId() {
         val output = """
             Display #22 (activities from top to bottom):
 
@@ -163,10 +171,11 @@ class DisplayOutputParsersTest {
     }
 
     @Test
-    fun `reports no entry for an app that is not running`() {
+    fun reportsNoEntryForAnAppThatIsNotRunning() {
         val map = DisplayOutputParsers.parseActivitiesByDisplay(
             "Display #0 (activities from top to bottom):\n  packageName=com.miui.home\n"
         )
-        assertTrue(map.values.none { "com.bilibili.fatego" in it })
+        val allPackages = map.values.flatten()
+        assertFalse("com.bilibili.fatego" in allPackages)
     }
 }
