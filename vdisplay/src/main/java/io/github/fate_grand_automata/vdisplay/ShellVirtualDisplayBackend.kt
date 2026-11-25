@@ -10,27 +10,26 @@ import java.util.concurrent.atomic.AtomicLong
  *
  *  - Every primitive used here was verified to work on the target device
  *    (Android 16 / API 36 / HyperOS) **before** a single line of this file existed,
- *    using nothing but an adb shell. The hidden-API route
+ *    using nothing but a root shell. The hidden-API route
  *    (`DisplayManager.createVirtualDisplay` + `IInputManager.injectInputEvent`)
  *    requires a privileged process and has no such pre-verification.
- *  - It needs no NDK, no native capture pipeline, no reflection, no proguard rules,
- *    and no privileged helper process, which keeps the stage-1 review surface small.
- *  - The class is written against [VirtualDisplayBackend], so replacing it with a
+ *  - It needs no NDK, no native capture pipeline, no reflection, no proguard rules and
+ *    no privileged helper process, which keeps the stage-1 review surface small.
+ *  - It is written against [VirtualDisplayBackend], so replacing it with a
  *    native/hidden-API implementation later does not touch FGA code.
  *
- * Known limitations, stated rather than hidden (see STAGE1_VERIFICATION.md P-8):
+ * Known limitations, stated rather than hidden (STAGE1_VERIFICATION.md P-8):
  *
  *  - An `overlay_display_devices` display is an OVERLAY on the physical screen; the
- *    target app is *not* invisible on the main display. This satisfies the stage-1
- *    goal (independent capture + directed input) but **not** "main screen stays free".
- *  - `input -d ... swipe` is a child process; cancellation is best-effort.
- *  - Display creation goes through a global setting, so it is process-global state,
- *    not per-app. The backend therefore must be a singleton and must restore the
- *    previous value on stop().
+ *    target app is *not* invisible on the main display. This satisfies the stage-1 goal
+ *    (independent capture + directed input) but **not** "main screen stays free".
+ *  - `input -d ... swipe` is a child process, so cancellation is best-effort only.
+ *  - Display creation goes through a global setting, i.e. process-global state rather
+ *    than per-app. The backend therefore restores the previous value on stop().
  *
- * Thread-safety: all public methods are synchronized on `lock`. FGA calls capture and
- * gestures from the script thread, teardown from the service thread; serialising keeps
- * the state machine honest at the cost of throughput we do not need at 330ms scan
+ * Thread-safety: public methods are synchronized on [lock]. FGA calls capture and
+ * gestures from the script thread and teardown from the service thread; serialising
+ * keeps the state machine honest at a throughput we do not need at 330ms scan
  * intervals.
  */
 class ShellVirtualDisplayBackend(
@@ -45,13 +44,13 @@ class ShellVirtualDisplayBackend(
     private var currentConfig: DisplayConfig? = null
     private var currentIds: DisplayIds? = null
 
-    /** Value of `overlay_display_devices` before we touched it, for exact restore. */
+    /** `overlay_display_devices` before we touched it, for exact restore. */
     private var previousOverlaySetting: String? = null
 
     private val frameSequence = AtomicLong(0)
     private val gestureSequence = AtomicInteger(0)
 
-    /** Set after stopApp() so a subsequent capture cannot silently return the old frame. */
+    /** Set after stopApp() so a later capture cannot silently return the dead app's frame. */
     @Volatile
     private var frameInvalidated = false
 
@@ -76,7 +75,7 @@ class ShellVirtualDisplayBackend(
                 shell.log("start() ignored: already running as $currentIds")
                 return
             }
-            require(state == State.IDLE) { "start() re-entered during $state" }
+            check(state == State.IDLE) { "start() re-entered during $state" }
 
             // Stage 1 only claims 16:9. See DisplayConfig.isSixteenByNine for why.
             if (!config.isSixteenByNine) {
@@ -98,11 +97,11 @@ class ShellVirtualDisplayBackend(
                 previousOverlaySetting = readOverlaySetting()
                 shell.log("previous overlay_display_devices = $previousOverlaySetting")
 
-                // Snapshot BEFORE creating, so the new display can be identified by
-                // set difference. SF ids have no arithmetic relation to logical ids and
-                // change on every recreate; see DisplayIds' KDoc for the measurements.
+                // Snapshot BEFORE creating, so the new display is identifiable by set
+                // difference: SF ids have no arithmetic relation to logical ids and change
+                // on every recreate (DisplayIds' KDoc has the measurements).
                 val sfBefore = surfaceFlingerDisplayIds()
-                val logicalBefore = logicalDisplayIds()
+                val logicalBefore = logicalDisplays().map { it.displayId }
 
                 writeOverlaySetting(config)
                 val created = awaitDisplayCreation(sfBefore, logicalBefore)
@@ -136,9 +135,9 @@ class ShellVirtualDisplayBackend(
             state = State.STOPPING
             try {
                 if (wasRunning) {
-                    // Order matters: release input, then invalidate the frame, then drop the
-                    // display, then restore the setting. Dropping the display first would leave
-                    // any in-flight gesture with no target, which is how stuck pointers happen.
+                    // Order matters: release input, invalidate the frame, drop the display,
+                    // restore the setting. Dropping the display first would leave any
+                    // in-flight gesture with no target, which is how stuck pointers happen.
                     runCatching { cancelGestureLocked() }
                     frameInvalidated = true
                     currentIds = null
@@ -193,8 +192,8 @@ class ShellVirtualDisplayBackend(
             )
         }
 
-        // Geometry guard. This is the check that turns "captured the wrong display"
-        // from a silent mis-recognition into an immediate, obvious failure.
+        // Geometry guard: turns "captured the wrong display" from a silent mis-recognition
+        // into an immediate, obvious failure.
         if (header.width != cfg.width || header.height != cfg.height) {
             throw VirtualDisplayError.CaptureFailed(
                 "captured ${header.width}x${header.height} but the virtual display is " +
@@ -259,18 +258,15 @@ class ShellVirtualDisplayBackend(
     /**
      * Best-effort gesture cancellation.
      *
-     * `input` has no cancel verb, so this sends a neutral, zero-duration tap far
-     * outside the display in an attempt to leave the input state clean, and logs the
-     * limitation. This is honestly the weakest part of the shell backend: it cannot
-     * guarantee a release if the child process is still mid-swipe. Recorded as a known
-     * gap rather than presented as a solution.
+     * `input` has no cancel verb, so this issues a zero-duration tap outside the display
+     * and logs the attempt. This is honestly the weakest part of the shell backend: it
+     * cannot guarantee a release if a child process is still mid-swipe. Recorded as a
+     * known gap rather than presented as a solution.
      */
     private fun cancelGestureLocked() {
         val ids = currentIds ?: return
         gestureSequence.incrementAndGet()
-        val argv = listOf(
-            INPUT, "-d", ids.logicalId.toString(), "tap", "-1", "-1"
-        )
+        val argv = listOf(INPUT, "-d", ids.logicalId.toString(), "tap", "-1", "-1")
         val r = runCatching { shell.run(argv, CANCEL_TIMEOUT_MS) }
         shell.log(
             "cancelGesture: best-effort out-of-bounds tap -> " +
@@ -317,12 +313,11 @@ class ShellVirtualDisplayBackend(
         if (!r.isSuccess) {
             shell.log("force-stop $packageName -> ${r.firstMeaningfulLine()}")
         }
-        // Any frame captured before this point shows the app that no longer exists.
+        // Any frame captured before this point shows an app that no longer exists.
         frameInvalidated = true
     }
 
-    // ---------------------------------------------------------------------- state
-
+    /** True when the cached frame no longer reflects reality (e.g. after stopApp). */
     fun isFrameInvalidated(): Boolean = frameInvalidated
 
     // -------------------------------------------------------------------- internals
@@ -363,9 +358,7 @@ class ShellVirtualDisplayBackend(
     }
 
     private fun readOverlaySetting(): String? {
-        val r = shell.run(
-            listOf(SETTINGS, "get", "global", OVERLAY_KEY), SETTING_TIMEOUT_MS
-        )
+        val r = shell.run(listOf(SETTINGS, "get", "global", OVERLAY_KEY), SETTING_TIMEOUT_MS)
         if (!r.isSuccess) {
             throw VirtualDisplayError.PermissionDenied(
                 "cannot read $OVERLAY_KEY: ${r.firstMeaningfulLine()}"
@@ -402,7 +395,7 @@ class ShellVirtualDisplayBackend(
         }
     }
 
-    private fun surfaceFlingerDisplayIds(): Map<Long, String> {
+    private fun surfaceFlingerDisplayIds(): Map<ULong, String> {
         val r = shell.run(listOf(DUMPSYS, "SurfaceFlinger", "--display-id"), DUMPSYS_TIMEOUT_MS)
         if (!r.isSuccess) {
             throw VirtualDisplayError.CreationFailed(
@@ -422,28 +415,25 @@ class ShellVirtualDisplayBackend(
         return DisplayOutputParsers.parseLogicalDisplays(r.stdout)
     }
 
-    private fun logicalDisplayIds(): List<Int> = logicalDisplays().map { it.displayId }
-
     /**
-     * Wait for the new display to appear, then pair its logical id with its
-     * SurfaceFlinger id.
+     * Wait for the new display to appear, then pair its logical id with its SF id.
      *
-     * Pairing strategy, in order of preference:
-     *  1. logical id = display that is new since the snapshot (non-zero);
-     *  2. SF id = display that is new since the SF snapshot, preferring one whose name
-     *     contains "Virtual";
-     *  3. corroborate by checking `layerStack == logicalId`, which held on every
-     *     measurement taken on this device (see STAGE1_VERIFICATION.md P-2).
+     * Pairing strategy:
+     *  1. logical id = the non-zero display that is new since the snapshot;
+     *  2. SF id = the display that is new since the SF snapshot, preferring one whose
+     *     description identifies it as virtual;
+     *  3. corroborate with `layerStack == logicalId`, which held on every measurement
+     *     taken on this device (STAGE1_VERIFICATION.md P-2).
      *
-     * If step 2 is not conclusive the SF id is left null and capture will refuse,
-     * which is the safe failure mode.
+     * If step 2 is inconclusive the SF id stays null and capture refuses to run, which is
+     * the safe failure mode.
      */
     private fun awaitDisplayCreation(
-        sfBefore: Map<Long, String>,
+        sfBefore: Map<ULong, String>,
         logicalBefore: List<Int>,
     ): DisplayIds {
         val deadline = System.nanoTime() + DISPLAY_CREATE_TIMEOUT_MS * 1_000_000
-        var lastLogical: Int? = null
+        var sawLogicalWithoutSf: Int? = null
         while (System.nanoTime() < deadline) {
             val logicalNow = logicalDisplays()
             val newLogical = logicalNow.filter {
@@ -451,7 +441,7 @@ class ShellVirtualDisplayBackend(
             }
             if (newLogical.isNotEmpty()) {
                 val candidate = newLogical.maxByOrNull { it.displayId }!!
-                lastLogical = candidate.displayId
+                sawLogicalWithoutSf = candidate.displayId
                 val sfNow = surfaceFlingerDisplayIds()
                 val newSf = sfNow.keys.filter { it !in sfBefore.keys }
                 val sfId = pickSurfaceFlingerId(newSf, sfNow)
@@ -466,11 +456,13 @@ class ShellVirtualDisplayBackend(
         }
         throw VirtualDisplayError.CreationFailed(
             "virtual display did not appear within ${DISPLAY_CREATE_TIMEOUT_MS}ms" +
-                (lastLogical?.let { " (logical id $it appeared but its SurfaceFlinger id did not)" } ?: "")
+                (sawLogicalWithoutSf?.let {
+                    " (logical id $it appeared but its SurfaceFlinger id did not)"
+                } ?: "")
         )
     }
 
-    private fun pickSurfaceFlingerId(newSf: List<Long>, sfNow: Map<Long, String>): Long? {
+    private fun pickSurfaceFlingerId(newSf: List<ULong>, sfNow: Map<ULong, String>): ULong? {
         if (newSf.isEmpty()) return null
         if (newSf.size == 1) return newSf.first()
         // Prefer anything that identifies itself as a virtual / overlay display.
