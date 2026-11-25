@@ -1,0 +1,113 @@
+package io.github.fate_grand_automata.scripts.supportSelection
+
+import io.github.fate_grand_automata.SupportImageKind
+import io.github.fate_grand_automata.scripts.IFgoAutomataApi
+import io.github.fate_grand_automata.scripts.Images
+import io.github.fate_grand_automata.scripts.enums.BondCEEffectEnum
+import io.github.fate_grand_automata.scripts.prefs.ISupportPreferences
+import io.github.lib_automata.Region
+import io.github.lib_automata.dagger.ScriptScope
+import javax.inject.Inject
+
+@ScriptScope
+class CESelection @Inject constructor(
+    api: IFgoAutomataApi,
+    private val supportPrefs: ISupportPreferences,
+    private val starChecker: SupportSelectionStarChecker,
+    private val grandChecker: SupportSelectionGrandChecker
+) : IFgoAutomataApi by api {
+    private companion object {
+        /*
+         * Bond CE effect images are pretty small, so we need to lower the similarity threshold to
+         * avoid false negatives when images are offset by half a pixel.
+         */
+        const val bondEffectSimilarity = 0.6
+    }
+
+    // These options are only shown in the UI while Grand Servant is enabled
+    private val bondCEEffect
+        get() = if (supportPrefs.grandServant) supportPrefs.bondCEEffect else BondCEEffectEnum.Ignore
+
+    private val requireBothNormalAndRewardMatch
+        get() = supportPrefs.grandServant && supportPrefs.requireBothNormalAndRewardMatch
+
+    fun check(ces: List<String>, bounds: SupportBounds): Boolean {
+        // TODO: Only check the lower part (excluding Servant)
+        val searchRegion = bounds.region.clip(locations.support.listRegion)
+        val grandSearchRegion = bounds.region.clip(locations.support.grandCeListRegion)
+
+        if (ces.isEmpty()) {
+            // servant must not have blank ce
+            return !searchRegion.exists(images[Images.SupportBlankCE])
+        }
+
+        if (isGrandServant(grandSearchRegion)) {
+            val matched = ces
+                .flatMap { entry -> images.loadSupportPattern(SupportImageKind.CE, entry) }
+                .mapNotNull {
+                    grandSearchRegion.find(it)
+                }
+                .filter {
+                    !supportPrefs.mlb || isGrandLimitBroken(it.region)
+                }
+
+            val grandCeRegion1 = locations.support.grandCeRegion1.copy(y = searchRegion.y + locations.support.grandCeRegion1.y)
+            val grandCeRegion3 = locations.support.grandCeRegion3.copy(y = searchRegion.y + locations.support.grandCeRegion3.y)
+
+            val normalMatch = matched.any { grandCeRegion1.contains(it.region) }
+            val rewardMatch = matched.any { grandCeRegion3.contains(it.region) }
+
+            val ceSlotMatch = if (requireBothNormalAndRewardMatch) {
+                normalMatch && rewardMatch
+            } else {
+                normalMatch || rewardMatch
+            }
+            if (!ceSlotMatch) {
+                return false
+            }
+
+            val bondEffectImage = when (bondCEEffect) {
+                BondCEEffectEnum.Ignore -> return true
+                BondCEEffectEnum.Default -> Images.BondCeEffectDefault
+                BondCEEffectEnum.NP -> Images.BondCeEffectNP
+            }
+            val bondRegion = locations.support.bondCeRegion.copy(y = searchRegion.y + locations.support.bondCeRegion.y)
+
+            return bondRegion.exists(images[bondEffectImage], similarity = bondEffectSimilarity)
+        } else {
+            val matched = ces
+                .flatMap { entry -> images.loadSupportPattern(SupportImageKind.CE, entry) }
+                .mapNotNull {
+                    searchRegion.find(it)
+                }
+                .filter {
+                    !supportPrefs.mlb || isLimitBroken(it.region)
+                }
+            return matched.isNotEmpty()
+                && !requireBothNormalAndRewardMatch
+                && bondCEEffect == BondCEEffectEnum.Ignore
+        }
+    }
+
+    private fun isLimitBroken(craftEssence: Region): Boolean {
+        val limitBreakRegion = locations.support.limitBreakRegion
+            .copy(y = craftEssence.y)
+
+        return starChecker.isStarPresent(limitBreakRegion)
+    }
+
+    private fun isGrandServant(ces: Region): Boolean {
+        val multiCeLabelRegion = locations.support.grandCeLabelRegion
+            .copy(y = ces.y + 40)
+
+        return grandChecker.isGrandPresent(multiCeLabelRegion)
+    }
+
+    private fun isGrandLimitBroken(craftEssence: Region): Boolean {
+        val limitBreakRegion = locations.support.grandLimitBreakRegion
+            .copy(y = craftEssence.y)
+
+        return starChecker.isStarPresent(limitBreakRegion)
+    }
+
+}

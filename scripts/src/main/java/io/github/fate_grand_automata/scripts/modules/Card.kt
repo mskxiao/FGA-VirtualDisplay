@@ -1,0 +1,152 @@
+package io.github.fate_grand_automata.scripts.modules
+
+import io.github.fate_grand_automata.scripts.IFgoAutomataApi
+import io.github.fate_grand_automata.scripts.ScriptLog
+import io.github.fate_grand_automata.scripts.enums.BraveChainEnum
+import io.github.fate_grand_automata.scripts.enums.CardTypeEnum
+import io.github.fate_grand_automata.scripts.models.CommandCard
+import io.github.fate_grand_automata.scripts.models.FieldSlot
+import io.github.fate_grand_automata.scripts.models.NPUsage
+import io.github.fate_grand_automata.scripts.models.ParsedCard
+import io.github.fate_grand_automata.scripts.models.SpamConfigPerTeamSlot
+import io.github.fate_grand_automata.scripts.models.TeamSlot
+import io.github.fate_grand_automata.scripts.models.battle.BattleState
+import io.github.fate_grand_automata.scripts.models.toFieldSlot
+import io.github.fate_grand_automata.scripts.modules.attack.AttackPriorityHandler
+import io.github.fate_grand_automata.scripts.prefs.IBattleConfig
+import io.github.lib_automata.dagger.ScriptScope
+import javax.inject.Inject
+
+@ScriptScope
+class Card @Inject constructor(
+    api: IFgoAutomataApi,
+    private val servantTracker: ServantTracker,
+    private val state: BattleState,
+    private val spamConfig: SpamConfigPerTeamSlot,
+    private val caster: Caster,
+    private val parser: CardParser,
+    private val priority: FaceCardPriority,
+    private val battleConfig: IBattleConfig
+) : IFgoAutomataApi by api {
+
+    fun readCommandCards(): List<ParsedCard> = useSameSnapIn {
+        parser.parse()
+    }
+
+    private val spamNps: Set<CommandCard.NP>
+        get() =
+            (FieldSlot.list.zip(CommandCard.NP.list))
+                .mapNotNull { (servantSlot, np) ->
+                    val teamSlot = servantTracker.deployed[servantSlot] ?: return@mapNotNull null
+                    val npSpamConfig = spamConfig[teamSlot].np
+
+                    if (caster.canSpam(npSpamConfig.spam) && (state.stage + 1) in npSpamConfig.waves)
+                        np
+                    else null
+                }
+                .toSet()
+
+    private fun pickCards(
+        cards: List<ParsedCard>,
+        npUsage: NPUsage
+    ): List<CommandCard.Face> {
+        fun <T> List<T>.inCurrentWave(default: T) =
+            if (isNotEmpty())
+                this[state.stage.coerceIn(indices)]
+            else default
+
+        val cardsOrderedByPriority = priority.sort(
+            cards,
+            state.stage,
+            useServantPriority = battleConfig.useServantPriority.inCurrentWave(false)
+        )
+
+        val braveChainsPerWave = battleConfig.braveChains
+        val rearrangeCardsPerWave = battleConfig.rearrangeCards
+
+        val useChainPriority = battleConfig.useChainPriority.inCurrentWave(false)
+        if (useChainPriority) {
+            // Only the NPs that fit after the cards clicked before them are part of the attack
+            val npUsageToUse = NPUsage(
+                (npUsage.nps + spamNps.detected())
+                    .take((3 - npUsage.cardsBeforeNP).coerceAtLeast(0))
+                    .toSet(),
+                npUsage.cardsBeforeNP
+            )
+
+            val npTypes = npUsageToUse.nps.associate { it.toFieldSlot() to it.type() }
+            val chainPriority = battleConfig.chainPriority.enabledAtWave(state.stage)
+            return AttackPriorityHandler.pick(
+                cards = cards,
+                priorityOrder = cardsOrderedByPriority,
+                npUsage = npUsageToUse,
+                braveChainEnum = braveChainsPerWave.inCurrentWave(BraveChainEnum.None),
+                chainPriority = chainPriority,
+                rearrange = rearrangeCardsPerWave.inCurrentWave(false),
+                npTypes = npTypes,
+            ).map { it.card }
+        }
+
+        // Always is only offered with Chain Priority. Without it, a saved Always acts as With NP.
+        val braveChains = braveChainsPerWave.inCurrentWave(BraveChainEnum.None)
+            .let { if (it == BraveChainEnum.Always) BraveChainEnum.WithNP else it }
+        return ApplyBraveChains.pick(
+            cards = cardsOrderedByPriority,
+            npUsage = npUsage,
+            braveChains = braveChains,
+            rearrange = rearrangeCardsPerWave.inCurrentWave(false),
+        ).map { it.card }
+    }
+
+    fun clickCommandCards(
+        cards: List<ParsedCard>,
+        npUsage: NPUsage
+    ) {
+        val pickedCards = pickCards(cards, npUsage)
+            .take(3)
+
+        if (npUsage.cardsBeforeNP > 0) {
+            pickedCards
+                .take(npUsage.cardsBeforeNP)
+                .also { messages.log(ScriptLog.ClickingCards(it)) }
+                .forEach { caster.use(it) }
+        }
+
+        val nps = npUsage.nps + spamNps
+
+        if (nps.isNotEmpty()) {
+            nps
+                .also { messages.log(ScriptLog.ClickingNPs(it)) }
+                .forEach { caster.use(it) }
+        }
+
+        pickedCards
+            .drop(npUsage.cardsBeforeNP)
+            .also { messages.log(ScriptLog.ClickingCards(it)) }
+            .forEach { caster.use(it) }
+    }
+
+    fun CommandCard.NP.type(): CardTypeEnum {
+        val fieldSlot = this.toFieldSlot()
+        val teamSlot = servantTracker.deployed[fieldSlot] ?: return CardTypeEnum.Unknown
+        if (teamSlot is TeamSlot.Unknown) return CardTypeEnum.Unknown
+        return servantTracker.getNpCardType(teamSlot)
+    }
+
+    // TODO: Use this to filter NPs for chain planning once NP card detection is reliable.
+    // This helper is intentionally unused for now. In pickCards, scripted NPs are assumed
+    // ready and only spam NPs are filtered by detection.
+    fun NPUsage.detected (): NPUsage {
+        val validNPs = (this.nps + spamNps).detected()
+        return NPUsage(validNPs, this.cardsBeforeNP)
+    }
+
+    fun Set<CommandCard.NP>.detected (): Set<CommandCard.NP> {
+        // Matching the NP portraits is slow, so it is skipped when there are no NPs to check
+        if (isEmpty()) return emptySet()
+        val npCardsDetected = servantTracker.npCardsDetectedUsingServantFaces()
+        return this
+            .filter { it in npCardsDetected }
+            .toSet()
+    }
+}

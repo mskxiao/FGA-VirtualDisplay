@@ -1,0 +1,42 @@
+package io.github.fate_grand_automata.scripts.prefs
+
+import io.github.fate_grand_automata.scripts.enums.BraveChainEnum
+import io.github.fate_grand_automata.scripts.enums.GameServer
+import io.github.fate_grand_automata.scripts.enums.MaterialEnum
+import io.github.fate_grand_automata.scripts.enums.ShuffleCardsEnum
+import io.github.fate_grand_automata.scripts.models.CardPriorityPerWave
+import io.github.fate_grand_automata.scripts.models.ServantPriorityPerWave
+import io.github.fate_grand_automata.scripts.models.ServantSpamConfig
+import io.github.fate_grand_automata.scripts.models.battle.ChainPriorityPerWave
+
+interface IBattleConfig {
+    val id: String
+    var name: String
+    var skillCommand: String
+    var cardPriority: CardPriorityPerWave
+    /** One value per wave. Waves past the end use the last value. */
+    val useServantPriority: List<Boolean>
+    val servantPriority: ServantPriorityPerWave
+    /** One value per wave. Waves past the end use the last value. */
+    val useChainPriority: List<Boolean>
+    val chainPriority: ChainPriorityPerWave
+    val rearrangeCards: List<Boolean>
+    val braveChains: List<BraveChainEnum>
+    val party: Int
+    val materials: Set<MaterialEnum>
+    val support: ISupportPreferences
+    val shuffleCards: ShuffleCardsEnum
+    val shuffleCardsWave: Int
+
+    var spam: List<ServantSpamConfig>
+    val autoChooseTarget: Boolean
+
+    val server: GameServer?
+
+    val addRaidTurnDelay: Boolean
+    val raidTurnDelaySeconds : Int
+
+    fun export(): Map<String, *>
+
+    fun import(map: Map<String, *>)
+}
