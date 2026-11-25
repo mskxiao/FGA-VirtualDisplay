@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name" translatable="false">FGA (Debug)</string>
+
+    <string name="game_server_na" translatable="false">NA</string>
+    <string name="game_server_jp" translatable="false">JP</string>
+    <string name="game_server_cn" translatable="false">CN</string>
+    <string name="game_server_tw" translatable="false">TW</string>
+    <string name="game_server_kr" translatable="false">KR</string>
+    <string name="game_server_na_bfgo" translatable="false">NA (Better FGO)</string>
+    <string name="game_server_jp_bfgo" translatable="false">JP (Better FGO)</string>
+
+    <string name="link_troubleshoot" translatable="false">https://github.com/Fate-Grand-Automata/FGA/wiki/Troubleshooting</string>
+    <string name="link_releases" translatable="false">https://github.com/Fate-Grand-Automata/FGA/releases</string>
+    <string name="link_discord" translatable="false">https://tinyurl.com/2z2d6wuz</string>
+    <string name="discord" translatable="false">Discord</string>
+    <string name="link_youtube" translatable="false">https://www.youtube.com/watch?v=JOwupZ4W8AQ&amp;t=4m10s</string>
+    <string name="link_dontkillmyapp" translatable="false">https://dontkillmyapp.com/</string>
+    <string name="link_donate" translatable="false">https://ko-fi.com/fategrandautomata</string>
+
+    <string name="language_en" translatable="false">English</string>
+    <string name="language_ja" translatable="false">日本語</string>
+    <string name="language_zhCN" translatable="false">中文（中国）</string>
+    <string name="language_zhTW" translatable="false">中文（台湾）</string>
+    <string name="language_ko" translatable="false">한국어</string>
+    <string name="language_vi" translatable="false">Tiếng Việt</string>
+
+    <string name="skill_upgrade_level_change" translatable="false">"%1$d → %2$d"</string>
+</resources>
