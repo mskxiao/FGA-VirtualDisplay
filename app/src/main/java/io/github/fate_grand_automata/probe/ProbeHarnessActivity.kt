@@ -48,37 +48,40 @@ class ProbeHarnessActivity : AppCompatActivity() {
     @Volatile
     private var runner: ProbeRunner? = null
 
-    private var startedAt: String = ""
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        statusView = TextView(this).apply {
+        val ctx = this
+
+        statusView = TextView(ctx).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setPadding(24, 24, 24, 12)
             typeface = android.graphics.Typeface.MONOSPACE
         }
-        stepView = TextView(this).apply {
+        stepView = TextView(ctx).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setPadding(24, 0, 24, 24)
             typeface = android.graphics.Typeface.MONOSPACE
         }
 
-        runOnceButton = Button(this).apply {
+        runOnceButton = Button(ctx).apply {
             text = "单次"
             setOnClickListener { startRun(1) }
         }
-        runSuiteButton = Button(this).apply {
+        runSuiteButton = Button(ctx).apply {
             text = "连续 3 次"
             setOnClickListener { startRun(ProbeSuite.DEFAULT_ITERATIONS) }
         }
-        releaseButton = Button(this).apply {
+        // `enabled` is ambiguous inside an apply block on a View: the receiver is the Button
+        // but `this` in a nested lambda would be the Activity. Setting it explicitly avoids
+        // that trap and documents which is which.
+        releaseButton = Button(ctx).apply {
             text = "强制释放"
-            enabled = false
             setOnClickListener { forceRelease() }
         }
+        releaseButton.isEnabled = false
 
-        val buttons = LinearLayout(this).apply {
+        val buttons = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(12, 0, 12, 24)
@@ -87,14 +90,14 @@ class ProbeHarnessActivity : AppCompatActivity() {
             addView(releaseButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
 
-        val column = LinearLayout(this).apply {
+        val column = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             addView(statusView)
             addView(stepView)
             addView(buttons)
         }
 
-        setContentView(ScrollView(this).apply { addView(column) })
+        setContentView(ScrollView(ctx).apply { addView(column) })
         statusView.text = buildHeader()
     }
 
@@ -119,7 +122,7 @@ class ProbeHarnessActivity : AppCompatActivity() {
         runOnceButton.isEnabled = false
         runSuiteButton.isEnabled = false
         releaseButton.isEnabled = true
-        startedAt = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        val startedAt = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
 
         stepView.text = "开始运行…\n"
         statusView.text = buildHeader() +
@@ -199,7 +202,8 @@ class ProbeHarnessActivity : AppCompatActivity() {
         worker.execute {
             val released = EmergencyRelease.releaseEverything(this)
             main.post {
-                statusView.text = buildHeader() + "强制释放：\n" + released.joinToString("\n") + "\n"
+                statusView.text = buildHeader() + "强制释放：\n" +
+                    released.joinToString("\n") + "\n"
                 finishRun()
             }
         }
@@ -227,9 +231,12 @@ class ProbeHarnessActivity : AppCompatActivity() {
             sb.appendLine("── 第 ${it.index}/${p.totalIterations} 次 ──")
             sb.appendLine("  passed=${it.passed} cleanAfter=${it.cleanAfter}")
             sb.appendLine("  logical=${it.logicalDisplayId} sf=${it.surfaceFlingerId}")
-            sb.appendLine("  displaysAfterStop=${it.displaysAfterStop} sfVirtual=${it.virtualDisplaysInSurfaceFlinger}")
+            sb.appendLine("  displaysAfterStop=${it.displaysAfterStop} " +
+                "sfVirtual=${it.virtualDisplaysInSurfaceFlinger}")
             for (r in it.results) {
-                if (r.verdict == ProbeRunner.Verdict.FAIL || r.verdict == ProbeRunner.Verdict.ERROR) {
+                if (r.verdict == ProbeRunner.Verdict.FAIL ||
+                    r.verdict == ProbeRunner.Verdict.ERROR
+                ) {
                     sb.appendLine("  [${r.verdict}] ${r.step.label}: ${r.detail}")
                 }
             }
@@ -238,6 +245,7 @@ class ProbeHarnessActivity : AppCompatActivity() {
     }
 
     private fun renderSuiteReport(report: ProbeSuite.SuiteReport) {
+        val ok = report.allPassed && report.allClean && report.idsDistinct
         val sb = StringBuilder()
         sb.appendLine("══ 套件结果（${report.iterations.size} 次）══")
         sb.appendLine("全部通过: ${report.allPassed}")
@@ -250,9 +258,9 @@ class ProbeHarnessActivity : AppCompatActivity() {
             sb.appendLine("第 ${it.index} 次: 通过=${it.passed} 释放=${it.cleanAfter} " +
                 "logical=${it.logicalDisplayId} sf=${it.surfaceFlingerId}")
         }
-        val ok = report.allPassed && report.allClean && report.idsDistinct
-        statusView.text = buildHeader() + sb.toString() + "\n总判定：" +
-            if (ok) "PASS" else "FAIL"
+        sb.appendLine()
+        sb.appendLine("总判定：" + if (ok) "PASS" else "FAIL")
+        statusView.text = buildHeader() + sb.toString()
         stepView.text = sb.toString()
     }
 
