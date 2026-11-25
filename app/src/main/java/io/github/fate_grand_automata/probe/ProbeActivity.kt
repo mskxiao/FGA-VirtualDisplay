@@ -38,7 +38,7 @@ class ProbeActivity : AppCompatActivity() {
 
         blockView = BlockView()
         val root = FrameLayout(this).apply {
-            setBackgroundColor(BACKGROUND)
+            setBackgroundColor(Observer.BACKGROUND)
             addView(
                 blockView,
                 FrameLayout.LayoutParams(
@@ -83,7 +83,7 @@ class ProbeActivity : AppCompatActivity() {
 
             // Centre the block, sized as a fraction of the shorter side, so the geometry is
             // predictable at 1280x720 and at any other size.
-            val side = (minOf(w, h) * BLOCK_FRACTION).coerceAtLeast(MIN_BLOCK_PX)
+            val side = (minOf(w, h) * Observer.BLOCK_FRACTION).coerceAtLeast(Observer.MIN_BLOCK_PX)
             val left = (w - side) / 2f
             val top = (h - side) / 2f
 
@@ -94,13 +94,15 @@ class ProbeActivity : AppCompatActivity() {
             paint.color = Observer.currentColor
             canvas.drawRect(left, top, left + side, top + side, paint)
 
-            // The tap marker is drawn as a small dark dot so the frame visibly changes even
-            // if a future palette edit makes two colours hard to tell apart. It is dark
-            // enough not to be mistaken for the block by ColorBlockDetector.
-            val tapped = Observer.lastTapSide
-            if (tapped != null) {
+            // A small dark dot marks the last tap, so the frame visibly changes even if a
+            // future palette edit makes two colours hard to tell apart. Dark enough not to
+            // be mistaken for the block by ColorBlockDetector.
+            val tappedSide = Observer.lastTapSide
+            if (tappedSide != null) {
                 paint.color = 0xFF202020.toInt()
-                canvas.drawCircle(Observer.lastTapX, Observer.lastTapY, TAP_MARKER_RADIUS_PX, paint)
+                canvas.drawCircle(
+                    Observer.lastTapX, Observer.lastTapY, Observer.TAP_MARKER_RADIUS_PX, paint,
+                )
             }
         }
     }
@@ -134,18 +136,16 @@ class ProbeActivity : AppCompatActivity() {
     }
 
     /**
-     * Cross-process-visible probe state, kept in a companion so the runner can assert on it
-     * while the activity lives in its own task on another display.
-     *
-     * Same process, different task/display - so plain fields are sufficient and no IPC is
-     * involved. `@Volatile` is used because the runner polls from a worker thread.
+     * Probe state that the runner asserts on while the activity lives in its own task on
+     * another display. Same process, different task - so plain volatile fields suffice and
+     * no IPC is involved; they are volatile because the runner polls from a worker thread.
      */
     object Observer {
         const val BACKGROUND = 0xFF101014.toInt()
 
         /**
-         * Red first, then green then blue: "the block is red" is the precondition and
-         * "the block is no longer red" is the post-tap assertion.
+         * Red first, then green then blue: "the block is red" is the precondition and "the
+         * block is no longer red" is the post-tap assertion.
          */
         @JvmField
         val PALETTE = intArrayOf(
@@ -156,8 +156,8 @@ class ProbeActivity : AppCompatActivity() {
 
         /** Block is a quarter of the shorter side: 180px at 720p, comfortably tappable. */
         const val BLOCK_FRACTION = 0.25f
-        private const val MIN_BLOCK_PX = 8f
-        private const val TAP_MARKER_RADIUS_PX = 6f
+        const val MIN_BLOCK_PX = 8f
+        const val TAP_MARKER_RADIUS_PX = 6f
 
         @Volatile
         @JvmField
@@ -242,16 +242,11 @@ class ProbeActivity : AppCompatActivity() {
             destroyed = destroyed,
         )
 
-        /** Human-readable colour name, for the on-screen report and the log. */
         fun colourName(argb: Int): String = when (argb) {
             PALETTE[0] -> "red"
             PALETTE[1] -> "green"
             PALETTE[2] -> "blue"
             else -> String.format("#%08X", argb)
         }
-    }
-
-    companion object {
-        const val BACKGROUND = Observer.BACKGROUND
     }
 }
