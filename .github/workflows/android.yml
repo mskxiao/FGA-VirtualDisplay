@@ -83,10 +83,33 @@ jobs:
       # The :vdisplay parser tests run on the JVM with no emulator. Run them before
       # the expensive APK build so a broken parser fails in ~1 minute, not ~10.
       - name: Unit tests (:vdisplay)
+        id: tests
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
           ./gradlew :vdisplay:test --stacktrace 2>&1 | tee test.log
+
+      # Publish the failing lines as a job annotation. Annotations are readable over the
+      # REST API without downloading artifacts, which makes the failure visible to an
+      # agent that has no repository token (artifact download requires auth).
+      - name: Summarise test failure
+        if: steps.tests.outcome == 'failure'
+        shell: bash
+        run: |
+          echo '::group::test.log (tail 120)'
+          tail -120 test.log 2>/dev/null || echo 'no test.log'
+          echo '::endgroup::'
+          {
+            echo '### :vdisplay unit tests FAILED'
+            echo ''
+            echo '```'
+            grep -E '^e: |FAILED|error:|Caused by|Could not|Execution failed' test.log 2>/dev/null | head -40
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          FIRST=$(grep -E '^e: |^> Task .*FAILED|Execution failed for task' test.log 2>/dev/null | head -1)
+          echo "::error title=:vdisplay unit tests failed::${FIRST:-see test.log}"
+          exit 1
 
       - name: Build APK (assembleCi)
         id: build
@@ -98,8 +121,26 @@ jobs:
           FGA_VERSION_CODE: ${{ github.run_number }}
           FGA_VERSION_NAME: ${{ steps.ver.outputs.build_name }}
 
+      - name: Summarise build failure
+        if: failure() && steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          echo '::group::build.log (tail 200)'
+          tail -200 build.log 2>/dev/null || echo 'no build.log'
+          echo '::endgroup::'
+          {
+            echo '### assembleCi FAILED'
+            echo ''
+            echo '```'
+            grep -E '^e: |FAILED|error:|Caused by|Execution failed' build.log 2>/dev/null | head -60
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          FIRST=$(grep -E '^e: |^> Task .*FAILED|Execution failed for task' build.log 2>/dev/null | head -1)
+          echo "::error title=assembleCi failed::${FIRST:-see build.log}"
+
       - name: Rename artifact
         id: artifact
+        if: steps.build.outcome == 'success'
         shell: bash
         run: |
           APK="$(find app/build/outputs/apk/ci -name '*.apk' -type f | head -1)"
@@ -120,6 +161,7 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: FGA-VirtualDisplay-${{ steps.ver.outputs.build_name }}
@@ -137,14 +179,3 @@ jobs:
             test.log
           if-no-files-found: warn
           retention-days: 14
-
-      - name: Show log tails on failure
-        if: failure()
-        shell: bash
-        run: |
-          echo '::group::test.log (tail 120)'
-          tail -120 test.log 2>/dev/null || echo 'no test.log'
-          echo '::endgroup::'
-          echo '::group::build.log (tail 200)'
-          tail -200 build.log 2>/dev/null || echo 'no build.log'
-          echo '::endgroup::'
