@@ -77,6 +77,42 @@
         </activity>
 
         <receiver android:name=".runner.ScriptRunnerNotification$NotificationReceiver" />
+
+        <!--
+            ============================================================
+            [FGA-VirtualDisplay] stage 2A probe
+            ============================================================
+
+            ProbeHarnessActivity is the harness: it runs on whichever display the
+            user is looking at and drives the closed loop. Exported so it can also
+            be started from a root shell, which is how three consecutive runs get
+            executed without tapping the phone each time.
+
+            ProbeActivity is the target under test. Deliberately NOT exported: it
+            must only ever start from our own probe. singleInstance keeps exactly
+            one copy, so its static Observer state cannot be split across two
+            instances - which would silently make the tap assertions meaningless.
+            It is landscape because the virtual display is 1280x720.
+        -->
+        <activity
+            android:name=".probe.ProbeHarnessActivity"
+            android:label="VD Probe"
+            android:exported="true"
+            android:excludeFromRecents="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".probe.ProbeActivity"
+            android:label="VD Probe Target"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen" />
     </application>
 
 </manifest>
