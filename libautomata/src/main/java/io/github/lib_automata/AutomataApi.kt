@@ -1,0 +1,83 @@
+package io.github.lib_automata
+
+import kotlin.time.Duration
+
+interface AutomataApi {
+    /**
+     * Gets the image content of this Region.
+     *
+     * @return an [Pattern] object with the image data
+     */
+    fun Region.getPattern(tag: String = ""): Pattern
+
+    fun <T> useSameSnapIn(block: () -> T): T
+
+    fun <T> useColor(block: () -> T): T
+
+    /**
+     * Waits for the specified duration.
+     *
+     * @param applyMultiplier whether to apply the wait multiplier or not
+     */
+    fun Duration.wait(applyMultiplier: Boolean = true)
+
+    fun Location.click(times: Int = 1)
+
+    fun Region.click(times: Int = 1) = center.click(times)
+
+    operator fun Region.contains(image: Pattern) = exists(image)
+
+    operator fun Region.contains(images: Collection<Pattern>) = images.any { contains(it) }
+
+    fun Region.find(
+        pattern: Pattern,
+        similarity: Double? = null
+    ): Match? = findAll(pattern, similarity).firstOrNull()
+
+    fun Region.find(
+        patterns: Collection<Pattern>,
+        similarity: Double? = null
+    ): Match? = patterns.firstNotNullOfOrNull { find(it, similarity) }
+
+    fun Pattern.find(
+        pattern: Pattern,
+        similarity: Double? = null
+    ): Match? = this.findBestMatch(pattern, similarity ?: 0.0)
+
+    fun Region.exists(
+        image: Pattern,
+        timeout: Duration = Duration.ZERO,
+        similarity: Double? = null
+    ): Boolean
+
+    fun Region.waitVanish(
+        image: Pattern,
+        timeout: Duration,
+        similarity: Double? = null
+    ): Boolean
+
+    fun Region.findAll(
+        pattern: Pattern,
+        similarity: Double? = null
+    ): List<Match>
+
+    fun Region.isWhite(): Boolean
+
+    fun Region.isBlack(): Boolean
+
+    /**
+     * Reads the text in this region with OCR, after turning it into black text on white.
+     *
+     * @param outlinedText fills the holes of outlined glyphs before OCR
+     * @param upscale enlarges the image 2x before OCR. This fixes misreads of small, bold text,
+     * such as CN's skill levels, but can cause new ones elsewhere, so only use it where it was
+     * tested to help.
+     */
+    fun Region.detectText(outlinedText: Boolean = false, upscale: Boolean = false): String
+
+    fun Map<Pattern, Region>.exists(
+        timeout: Duration = Duration.ZERO,
+        similarity: Double? = null,
+        requireAll: Boolean = false
+    ): Boolean
+}
