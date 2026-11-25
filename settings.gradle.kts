@@ -48,6 +48,13 @@ dependencyResolutionManagement {
 include(":prefs")
 include(":scripts")
 include(":libautomata")
+
+// [FGA-VirtualDisplay] stage 1: the virtual display backend seam.
+// Added by this fork; upstream FGA has no equivalent module. It is deliberately
+// separate from :libautomata and :scripts so FGA's automation core stays
+// platform- and display-agnostic, and so `git diff` against upstream stays narrow.
+include(":vdisplay")
+
 include(":app")
 
 rootProject.name="Fate Grand Automata"
