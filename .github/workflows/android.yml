@@ -72,7 +72,6 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # Fail early and legibly instead of drowning in a 2000-line Gradle dump.
       - name: Show environment
         shell: bash
         run: |
@@ -80,6 +79,14 @@ jobs:
           echo "gradle wrapper: $(grep distributionUrl gradle/wrapper/gradle-wrapper.properties)"
           echo "modules:"
           grep '^include' settings.gradle.kts
+
+      # The :vdisplay parser tests run on the JVM with no emulator. Run them before
+      # the expensive APK build so a broken parser fails in ~1 minute, not ~10.
+      - name: Unit tests (:vdisplay)
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :vdisplay:test --stacktrace 2>&1 | tee test.log
 
       - name: Build APK (assembleCi)
         id: build
@@ -120,21 +127,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload build log
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ steps.ver.outputs.build_name }}
-          path: build.log
+          path: |
+            build.log
+            test.log
           if-no-files-found: warn
           retention-days: 14
 
-      # Print the tail of the log inline so the failure is readable in the
-      # GitHub UI without downloading the artifact.
-      - name: Show build log tail on failure
+      - name: Show log tails on failure
         if: failure()
         shell: bash
         run: |
+          echo '::group::test.log (tail 120)'
+          tail -120 test.log 2>/dev/null || echo 'no test.log'
+          echo '::endgroup::'
           echo '::group::build.log (tail 200)'
           tail -200 build.log 2>/dev/null || echo 'no build.log'
           echo '::endgroup::'
