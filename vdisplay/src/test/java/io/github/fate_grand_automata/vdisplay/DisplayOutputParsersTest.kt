@@ -26,24 +26,30 @@ class DisplayOutputParsersTest {
     fun parsesBothPhysicalAndVirtualSurfaceFlingerIds() {
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(sfOutput)
         assertEquals(2, ids.size)
-        assertTrue(ids.containsKey(4630946738963277955L))
-        assertTrue(ids.containsKey(11529215048376362670L))
+        assertTrue(ids.containsKey(4630946738963277955UL))
+        assertTrue(ids.containsKey(11529215048376362670UL))
     }
 
     @Test
-    fun surfaceFlingerIdsExceedIntRangeAndMustBeParsedAsLong() {
-        // 11529215048376362670 > Int.MAX_VALUE. Parsing as Int would truncate it and
-        // capture would silently target the wrong display.
+    fun surfaceFlingerIdsExceedLongMaxAndMustBeParsedAsULong() {
+        // 11529215048376362670 = 0xA0000000898FA6AE exceeds Long.MAX_VALUE
+        // (9223372036854775807). Two of the four ids measured on the device did. A Long
+        // parser throws here, or worse, drops the entry and makes capture unresolvable.
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(sfOutput)
-        val virtual = ids.keys.first { it > Int.MAX_VALUE.toLong() }
-        assertEquals(11529215048376362670L, virtual)
+        val virtual = ids.keys.first { it > Long.MAX_VALUE.toULong() }
+        assertEquals(11529215048376362670UL, virtual)
+        // And it must still render as the exact decimal string screencap -d expects.
+        assertEquals("11529215048376362670", virtual.toString())
     }
 
     @Test
     fun keepsTheVirtualDisplayNameSoItCanBePreferredWhenResolving() {
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(sfOutput)
-        val desc = ids.getValue(11529215048376362670L)
-        assertTrue(desc.contains("Virtual"), "expected the SF description to mention Virtual, was: $desc")
+        val desc = ids.getValue(11529215048376362670UL)
+        assertTrue(
+            desc.contains("Virtual"),
+            "expected the SF description to mention Virtual, was: $desc",
+        )
     }
 
     @Test
@@ -56,7 +62,7 @@ class DisplayOutputParsersTest {
         """.trimIndent()
         val ids = DisplayOutputParsers.parseSurfaceFlingerDisplayIds(messy)
         assertEquals(1, ids.size)
-        assertTrue(ids.containsKey(42L))
+        assertTrue(ids.containsKey(42UL))
     }
 
     // ---------------------------------------------------------- logical displays
