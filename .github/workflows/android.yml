@@ -15,10 +15,9 @@ on:
         required: false
         default: 'manual build'
 
-# Deliberately NOT cancel-in-progress: a cancelled build tells us nothing about
-# whether the tree compiles, and a Gradle Android build costs ~10 minutes. Rapid
-# successive pushes should queue, not kill each other. Only pull-request builds
-# cancel their own predecessors, where a newer commit genuinely supersedes the old one.
+# Deliberately NOT cancel-in-progress on push: a cancelled build tells us nothing
+# about whether the tree compiles, and a Gradle Android build costs ~10 minutes.
+# Only pull-request builds cancel their own predecessors.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -29,7 +28,6 @@ permissions:
 env:
   JAVA_VERSION: '21'
   JAVA_DISTRO: 'temurin'
-  # Overrides the small heap in gradle.properties (sized for local AS coexistence).
   GRADLE_OPTS: '-Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"'
 
 jobs:
@@ -80,8 +78,8 @@ jobs:
           echo "modules:"
           grep '^include' settings.gradle.kts
 
-      # The :vdisplay parser tests run on the JVM with no emulator. Run them before
-      # the expensive APK build so a broken parser fails in ~1 minute, not ~10.
+      # :vdisplay tests run on the JVM with no emulator, so a broken parser fails in
+      # about a minute instead of after a ten-minute Android build.
       - name: Unit tests (:vdisplay)
         id: tests
         continue-on-error: true
@@ -90,25 +88,26 @@ jobs:
           set -o pipefail
           ./gradlew :vdisplay:test --stacktrace 2>&1 | tee test.log
 
-      # Publish the failing lines as a job annotation. Annotations are readable over the
-      # REST API without downloading artifacts, which makes the failure visible to an
-      # agent that has no repository token (artifact download requires auth).
+      # Annotations and the step summary are readable over the REST API without a
+      # token, while artifact downloads require auth. Keeping the real cause here
+      # makes a failure diagnosable from outside the repository.
       - name: Summarise test failure
         if: steps.tests.outcome == 'failure'
         shell: bash
         run: |
-          echo '::group::test.log (tail 120)'
-          tail -120 test.log 2>/dev/null || echo 'no test.log'
+          echo '::group::test.log (tail 150)'
+          tail -150 test.log 2>/dev/null || echo 'no test.log'
           echo '::endgroup::'
+          CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not' test.log 2>/dev/null | head -25)
           {
             echo '### :vdisplay unit tests FAILED'
             echo ''
             echo '```'
-            grep -E '^e: |FAILED|error:|Caused by|Could not|Execution failed' test.log 2>/dev/null | head -40
+            echo "${CAUSE:-no recognised error line; see the full log}"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
-          FIRST=$(grep -E '^e: |^> Task .*FAILED|Execution failed for task' test.log 2>/dev/null | head -1)
-          echo "::error title=:vdisplay unit tests failed::${FIRST:-see test.log}"
+          FIRST=$(echo "$CAUSE" | head -1)
+          echo "::error title=:vdisplay tests failed::${FIRST:-see test.log}"
           exit 1
 
       - name: Build APK (assembleCi)
@@ -122,20 +121,21 @@ jobs:
           FGA_VERSION_NAME: ${{ steps.ver.outputs.build_name }}
 
       - name: Summarise build failure
-        if: failure() && steps.build.outcome == 'failure'
+        if: steps.build.outcome == 'failure'
         shell: bash
         run: |
           echo '::group::build.log (tail 200)'
           tail -200 build.log 2>/dev/null || echo 'no build.log'
           echo '::endgroup::'
+          CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not' build.log 2>/dev/null | head -40)
           {
             echo '### assembleCi FAILED'
             echo ''
             echo '```'
-            grep -E '^e: |FAILED|error:|Caused by|Execution failed' build.log 2>/dev/null | head -60
+            echo "${CAUSE:-no recognised error line; see the full log}"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
-          FIRST=$(grep -E '^e: |^> Task .*FAILED|Execution failed for task' build.log 2>/dev/null | head -1)
+          FIRST=$(echo "$CAUSE" | head -1)
           echo "::error title=assembleCi failed::${FIRST:-see build.log}"
 
       - name: Rename artifact
