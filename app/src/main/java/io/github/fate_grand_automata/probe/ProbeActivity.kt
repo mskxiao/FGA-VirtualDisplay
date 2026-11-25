@@ -1,11 +1,8 @@
 package io.github.fate_grand_automata.probe
 
-import android.annotation.SuppressLint
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.os.Bundle
-import android.util.TypedValue
 import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
@@ -17,17 +14,17 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * It draws one solid colour block on a flat background. A tap inside the block flips it to
  * the next colour and records the tap. That gives the probe two independent assertions
- * that cannot both be satisfied by a coincidence:
+ * that a coincidence cannot satisfy together:
  *
  *  - the frame contains a block of the expected colour at the expected place, and
  *  - after a tap delivered to this display, that block changed colour.
  *
- * A false "success" would require a tap to be both delivered to this activity *and* land
- * inside the block, which is exactly what stage 2A is trying to demonstrate.
+ * The tap counters held here are the ground truth for "the tap reached *this* display",
+ * independent of what any screenshot shows. A false pass would require the tap to be
+ * delivered to this activity *and* land inside the block.
  *
- * Deliberately not using Compose: this must build and behave identically on the `ci`
- * buildType without pulling the Compose toolchain into the probe, and a plain View makes
- * the drawn geometry trivially predictable.
+ * Deliberately not Compose: the probe must build on the `ci` buildType without dragging
+ * the Compose toolchain in, and a plain View makes the drawn geometry predictable.
  */
 class ProbeActivity : AppCompatActivity() {
 
@@ -36,8 +33,8 @@ class ProbeActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Report the display this instance actually landed on, for the report.
-        currentDisplayId = display?.displayId ?: -1
+        Observer.resetState()
+        Observer.displayId = display?.displayId ?: -1
 
         blockView = BlockView()
         val root = FrameLayout(this).apply {
@@ -55,39 +52,56 @@ class ProbeActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        resumed = true
-        currentDisplayId = display?.displayId ?: currentDisplayId
+        Observer.resumed = true
+        Observer.displayId = display?.displayId ?: Observer.displayId
     }
 
     override fun onPause() {
-        resumed = false
+        Observer.resumed = false
         super.onPause()
     }
 
     override fun onDestroy() {
-        destroyed = true
+        Observer.destroyed = true
         super.onDestroy()
     }
 
     private inner class BlockView : View(this@ProbeActivity) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+        var blockLeft = 0f
+            private set
+        var blockTop = 0f
+            private set
+        var blockSide = 0f
+            private set
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             val w = width.toFloat()
             val h = height.toFloat()
 
-            // Centre the block and make it a fixed fraction of the shorter side, so the
-            // geometry is predictable at 1280x720 and any other size.
-            val side = (minOf(w, h) * BLOCK_FRACTION).coerceAtLeast(8f)
+            // Centre the block, sized as a fraction of the shorter side, so the geometry is
+            // predictable at 1280x720 and at any other size.
+            val side = (minOf(w, h) * BLOCK_FRACTION).coerceAtLeast(MIN_BLOCK_PX)
             val left = (w - side) / 2f
             val top = (h - side) / 2f
 
-            paint.color = currentColor
+            blockLeft = left
+            blockTop = top
+            blockSide = side
+
+            paint.color = Observer.currentColor
             canvas.drawRect(left, top, left + side, top + side, paint)
-            lastBlockLeft = left
-            lastBlockTop = top
-            lastBlockSide = side
+
+            // The tap marker is drawn as a small dark dot so the frame visibly changes even
+            // if a future palette edit makes two colours hard to tell apart. It is dark
+            // enough not to be mistaken for the block by ColorBlockDetector.
+            val tapped = Observer.lastTapSide
+            if (tapped != null) {
+                paint.color = 0xFF202020.toInt()
+                canvas.drawCircle(Observer.lastTapX, Observer.lastTapY, TAP_MARKER_RADIUS_PX, paint)
+            }
         }
     }
 
@@ -95,58 +109,45 @@ class ProbeActivity : AppCompatActivity() {
         if (event.actionMasked == MotionEvent.ACTION_UP) {
             val x = event.x
             val y = event.y
-            val side = blockView.lastBlockSide
-            val left = blockView.lastBlockLeft
-            val top = blockView.lastBlockTop
-            val inside = side > 0f && x >= left && x <= left + side && y >= top && y <= top + side
+            val side = blockView.blockSide
+            val left = blockView.blockLeft
+            val top = blockView.blockTop
+            val inside = side > 0f &&
+                x >= left && x <= left + side &&
+                y >= top && y <= top + side
 
-            tapCount.incrementAndGet()
+            Observer.tapCount.incrementAndGet()
+            Observer.lastTapX = x
+            Observer.lastTapY = y
+            Observer.lastTapSide = side
             if (inside) {
-                insideTapCount.incrementAndGet()
-                lastTapInsideBlock = true
-                advanceColour()
-                blockView.invalidate()
+                Observer.insideTapCount.incrementAndGet()
+                Observer.lastTapInsideBlock = true
+                Observer.advanceColour()
             } else {
-                lastTapInsideBlock = false
+                Observer.lastTapInsideBlock = false
             }
-            lastTapX = x
-            lastTapY = y
+            blockView.invalidate()
             return true
         }
         return true
     }
 
-    private fun advanceColour() {
-        val palette = PALETTE
-        val idx = palette.indexOf(currentColor)
-        currentColor = palette[(idx + 1) % palette.size]
-    }
-
     /**
-     * Snapshot of everything the test needs to assert, read from outside the activity.
-     * Static because the probe drives the activity as a separate task on another display.
+     * Cross-process-visible probe state, kept in a companion so the runner can assert on it
+     * while the activity lives in its own task on another display.
+     *
+     * Same process, different task/display - so plain fields are sufficient and no IPC is
+     * involved. `@Volatile` is used because the runner polls from a worker thread.
      */
-    data class Status(
-        val displayId: Int,
-        val currentColor: Int,
-        val tapCount: Int,
-        val insideTapCount: Int,
-        val lastTapInsideBlock: Boolean,
-        val lastTapX: Float,
-        val lastTapY: Float,
-        val resumed: Boolean,
-        val destroyed: Boolean,
-        val expectedBlockSidePx: Float,
-    )
-
-    companion object {
+    object Observer {
         const val BACKGROUND = 0xFF101014.toInt()
 
         /**
-         * The starting colour is red and the alternates are green and blue, so "the block
-         * is red" is the initial precondition and "the block is no longer red" is the
-         * post-tap assertion.
+         * Red first, then green then blue: "the block is red" is the precondition and
+         * "the block is no longer red" is the post-tap assertion.
          */
+        @JvmField
         val PALETTE = intArrayOf(
             0xFFFF0000.toInt(), // red - start
             0xFF00C853.toInt(), // green
@@ -155,30 +156,47 @@ class ProbeActivity : AppCompatActivity() {
 
         /** Block is a quarter of the shorter side: 180px at 720p, comfortably tappable. */
         const val BLOCK_FRACTION = 0.25f
+        private const val MIN_BLOCK_PX = 8f
+        private const val TAP_MARKER_RADIUS_PX = 6f
 
         @Volatile
-        private var currentColor: Int = PALETTE[0]
-        private val tapCount = AtomicInteger(0)
-        private val insideTapCount = AtomicInteger(0)
+        @JvmField
+        var currentColor: Int = PALETTE[0]
+
+        @JvmField
+        val tapCount = AtomicInteger(0)
+
+        @JvmField
+        val insideTapCount = AtomicInteger(0)
 
         @Volatile
-        private var lastTapInsideBlock: Boolean = false
-        @Volatile
-        private var lastTapX: Float = 0f
-        @Volatile
-        private var lastTapY: Float = 0f
+        @JvmField
+        var lastTapInsideBlock: Boolean = false
 
         @Volatile
-        var currentDisplayId: Int = -1
-            private set
+        @JvmField
+        var lastTapX: Float = 0f
 
         @Volatile
+        @JvmField
+        var lastTapY: Float = 0f
+
+        /** Non-null once at least one tap has been received; draws the tap marker. */
+        @Volatile
+        @JvmField
+        var lastTapSide: Float? = null
+
+        @Volatile
+        @JvmField
+        var displayId: Int = -1
+
+        @Volatile
+        @JvmField
         var resumed: Boolean = false
-            private set
 
         @Volatile
+        @JvmField
         var destroyed: Boolean = false
-            private set
 
         /** Reset between runs so repeated executions are independent. */
         fun resetState() {
@@ -188,13 +206,32 @@ class ProbeActivity : AppCompatActivity() {
             lastTapInsideBlock = false
             lastTapX = 0f
             lastTapY = 0f
-            currentDisplayId = -1
+            lastTapSide = null
+            displayId = -1
             resumed = false
             destroyed = false
         }
 
-        fun status(): Status = Status(
-            displayId = currentDisplayId,
+        fun advanceColour() {
+            val idx = PALETTE.indexOf(currentColor)
+            currentColor = PALETTE[(idx + 1) % PALETTE.size]
+        }
+
+        /** Immutable snapshot, so an assertion cannot straddle a concurrent change. */
+        data class Snapshot(
+            val displayId: Int,
+            val currentColor: Int,
+            val tapCount: Int,
+            val insideTapCount: Int,
+            val lastTapInsideBlock: Boolean,
+            val lastTapX: Float,
+            val lastTapY: Float,
+            val resumed: Boolean,
+            val destroyed: Boolean,
+        )
+
+        fun snapshot(): Snapshot = Snapshot(
+            displayId = displayId,
             currentColor = currentColor,
             tapCount = tapCount.get(),
             insideTapCount = insideTapCount.get(),
@@ -203,7 +240,6 @@ class ProbeActivity : AppCompatActivity() {
             lastTapY = lastTapY,
             resumed = resumed,
             destroyed = destroyed,
-            expectedBlockSidePx = 0f,
         )
 
         /** Human-readable colour name, for the on-screen report and the log. */
@@ -213,5 +249,9 @@ class ProbeActivity : AppCompatActivity() {
             PALETTE[2] -> "blue"
             else -> String.format("#%08X", argb)
         }
+    }
+
+    companion object {
+        const val BACKGROUND = Observer.BACKGROUND
     }
 }
