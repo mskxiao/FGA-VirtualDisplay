@@ -42,7 +42,6 @@ jobs:
         run: |
           SHA="${GITHUB_SHA}"
           SHORT="$(echo "$SHA" | cut -c1-7)"
-          echo "short=$SHORT" >>"$GITHUB_OUTPUT"
           echo "build_name=${SHORT}-run${GITHUB_RUN_NUMBER}" >>"$GITHUB_OUTPUT"
           {
             echo "### Build info"
@@ -74,60 +73,47 @@ jobs:
           echo "modules:"
           grep '^include' settings.gradle.kts
 
-      # Pure-JVM tests only; they need no emulator. Ordered cheapest first so a broken
-      # parser or a broken quoting rule fails in about a minute, not after a ten-minute
-      # Android build. Neither step aborts the job on its own; the diagnosis steps below
-      # decide what to report, so a failure always carries its reason.
+      # Pure-JVM tests, no emulator. Cheapest first so a broken parser or a broken quoting
+      # rule fails in about a minute rather than after a ten-minute Android build.
+      #
+      # These steps DO decide the job's fate (no continue-on-error), which is correct: a
+      # failing unit test should fail the run. The diagnosis steps below use `if: always()`
+      # so the reason is always published, even on a step that failed.
       - name: Unit tests (:vdisplay)
-        id: tests_vdisplay
         shell: bash
-        continue-on-error: true
         run: |
           set -o pipefail
           ./gradlew :vdisplay:test --stacktrace 2>&1 | tee test-vdisplay.log
 
-      # :app now carries the probe logic tests (su quoting, colour detector).
       - name: Unit tests (:app, probe logic)
-        id: tests_app
         shell: bash
-        continue-on-error: true
         run: |
           set -o pipefail
           ./gradlew :app:testCiUnitTest --stacktrace 2>&1 | tee test-app.log
 
-      # Runs unconditionally. GitHub's `steps.<id>.outcome` is not reliable across a
-      # `continue-on-error` step in every runner version, and a diagnosis step that silently
-      # skips is worse than useless - it makes a real failure look reasonless. So this looks
-      # at the logs themselves.
-      - name: Diagnose test results
-        if: always()
+      - name: Diagnose test failures
+        if: failure()
         shell: bash
         run: |
-          failed=0
           for f in test-vdisplay.log test-app.log; do
             [ -f "$f" ] || continue
-            case "$f" in
-              test-vdisplay.log) mod=":vdisplay" ;;
-              *) mod=":app" ;;
-            esac
             if grep -qE '^> Task .*FAILED|FAILURE: Build failed' "$f"; then
               echo "::group::$f (tail 120)"
               tail -120 "$f"
               echo '::endgroup::'
               CAUSE=$(grep -E '^e: file|^e: |Could not (resolve|find|create)|No matching variant|Unresolved reference|error:|Caused by:|> Could not|^> Task .*FAILED' "$f" | head -25)
               {
-                echo "### $mod tests FAILED"
+                echo "### $f FAILED"
                 echo ''
                 echo '```'
                 echo "${CAUSE:-no recognised error line}"
                 echo '```'
               } >>"$GITHUB_STEP_SUMMARY"
               FIRST=$(echo "$CAUSE" | head -1)
-              echo "::error title=$mod tests failed::${FIRST:-see $f}"
-              failed=1
+              echo "::error title=Tests failed ($f)::${FIRST:-see $f}"
             fi
           done
-          [ "$failed" = "1" ] && exit 1 || exit 0
+          exit 1
 
       - name: Build APK (assembleCi)
         id: build
@@ -139,16 +125,12 @@ jobs:
           FGA_VERSION_CODE: ${{ github.run_number }}
           FGA_VERSION_NAME: ${{ steps.ver.outputs.build_name }}
 
-      # Same reasoning as above: unconditional, and decides from the log. A Kotlin compile
-      # error is the most likely failure here, so the patterns target those messages.
-      - name: Diagnose build result
-        if: always()
+      # A Kotlin compile error is the most likely failure here, so the patterns target
+      # exactly those messages and nothing vaguer.
+      - name: Diagnose build failure
+        if: failure()
         shell: bash
         run: |
-          if [ -f build.log ] && grep -qE 'BUILD SUCCESSFUL' build.log; then
-            echo 'build succeeded'
-            exit 0
-          fi
           echo '::group::build.log (tail 200)'
           tail -200 build.log 2>/dev/null || echo 'no build.log'
           echo '::endgroup::'
@@ -157,7 +139,7 @@ jobs:
             echo '### assembleCi FAILED'
             echo ''
             echo '```'
-            echo "${CAUSE:-no recognised error line; see the artifact build-log}"
+            echo "${CAUSE:-no recognised error line; see the build-log artifact}"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
           FIRST=$(echo "$CAUSE" | head -1)
